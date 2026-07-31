@@ -3271,9 +3271,7 @@ public class FormatReaderTest {
   private IFormatReader setupReader(boolean flattened, boolean initialize) {
     IFormatReader ir = null;
     if (flattened) {
-      ir = new ImageReader();
-      ir = new BufferedImageReader(new Memoizer(ir, Memoizer.DEFAULT_MINIMUM_ELAPSED, new File("")));
-      ir.setMetadataOptions(new DynamicMetadataOptions(MetadataLevel.NO_OVERLAYS));
+      ir = createStandardReader();
     }
     else {
       ir = new BufferedImageReader(new ImageReader());
@@ -3303,6 +3301,13 @@ public class FormatReaderTest {
     if (flattened) {
       reader = (BufferedImageReader) ir;
     }
+    return ir;
+  }
+
+  /** Create the direct reader stack used by standard flattened data tests. */
+  static BufferedImageReader createStandardReader() {
+    BufferedImageReader ir = new BufferedImageReader(new ImageReader());
+    ir.setMetadataOptions(new DynamicMetadataOptions(MetadataLevel.NO_OVERLAYS));
     return ir;
   }
 
