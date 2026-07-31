@@ -990,11 +990,12 @@ public class Memoizer extends ReaderWrapper {
     final Deser ser = getDeser();
     final StopWatch sw = stopWatch();
     boolean rv = true;
+    tempFile = null;
     try {
       // Create temporary location for output
       // Note: can't rename tempfile until resources are closed.
       tempFile = File.createTempFile(
-        memoFile.getName(), "", memoFile.getParentFile());
+        memoFile.getName() + ".", ".tmp", memoFile.getParentFile());
 
       ser.saveStart(tempFile);
 
@@ -1021,22 +1022,44 @@ public class Memoizer extends ReaderWrapper {
         LOGGER.error("output close failed", t);
       }
 
-      // Rename temporary file if successful.
-      // Any failures will have to be ignored.
-      // Note: renaming the tempfile with open
-      // resources can lead to segfaults
+      // Install the temporary file if serialization succeeded.
+      // Note: moving the tempfile with open resources can lead to segfaults.
       if (rv) {
-        if (!tempFile.renameTo(memoFile)) {
-          LOGGER.error("temp file rename returned false: {}", tempFile);
-        } else {
+        try {
+          installMemo(tempFile, memoFile);
           LOGGER.debug("saved memo file: {} ({} bytes)",
             memoFile, memoFile.length());
+        }
+        catch (IOException | SecurityException e) {
+          LOGGER.error("failed to install memo file: {}", memoFile, e);
+          rv = false;
         }
       }
 
       deleteQuietly(tempFile);
     }
     return rv;
+  }
+
+  /**
+   * Move a completed temporary memo into its final location.
+   *
+   * @param source completed temporary memo
+   * @param destination final memo path
+   * @throws IOException if the memo cannot be installed
+   */
+  protected void installMemo(File source, File destination)
+    throws IOException
+  {
+    try {
+      java.nio.file.Files.move(source.toPath(), destination.toPath(),
+        java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+        java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+    }
+    catch (java.nio.file.AtomicMoveNotSupportedException e) {
+      java.nio.file.Files.move(source.toPath(), destination.toPath(),
+        java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+    }
   }
 
   /**
