@@ -173,7 +173,12 @@ public class MemoizerTest {
         reader.close();
       }
       catch (Exception e) {
-        failure = e;
+        if (failure == null) {
+          failure = e;
+        }
+        else {
+          failure.addSuppressed(e);
+        }
       }
     }
     for (int i = temporaryDirectories.size() - 1; i >= 0; i--) {
