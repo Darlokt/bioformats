@@ -138,6 +138,12 @@
         <class name="loci.formats.utests.AxisGuesserTest"/>
       </classes>
     </test>
+    <test name="MemoizerDependencyTest">
+      <groups/>
+      <classes>
+        <class name="loci.formats.utests.MemoizerDependencyTest"/>
+      </classes>
+    </test>
     <test name="FilePatternTests">
       <groups/>
       <classes>
