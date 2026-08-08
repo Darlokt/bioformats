@@ -84,6 +84,12 @@
         <class name="loci.formats.utests.ChannelMergerTest"/>
       </classes>
     </test>
+    <test name="MemoizerSaveTest">
+      <groups/>
+      <classes>
+        <class name="loci.formats.utests.MemoizerSaveTest"/>
+      </classes>
+    </test>
     <test name="ChannelSeparatorTest">
        <groups/>
       <classes>
