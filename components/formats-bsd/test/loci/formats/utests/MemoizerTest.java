@@ -38,7 +38,14 @@ import static org.testng.Assert.assertTrue;
 import static org.testng.Assert.assertNull;
 
 import java.io.File;
+import java.io.IOException;
+import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.util.ArrayList;
+import java.util.List;
 
 import loci.formats.Memoizer;
 import loci.formats.in.FakeReader;
@@ -57,23 +64,53 @@ public class MemoizerTest {
   private File idDir;
   private String id;
   private FakeReader reader;
+  private final List<Memoizer> memoizers = new ArrayList<Memoizer>();
+  private final List<Path> temporaryDirectories = new ArrayList<Path>();
 
-  private static File createTempDir() throws Exception {
-    return Files.createTempDirectory(TMP_PREFIX).toFile();
+  private File createTempDir() throws Exception {
+    Path directory = Files.createTempDirectory(TMP_PREFIX);
+    temporaryDirectories.add(directory);
+    return directory.toFile();
   }
 
-  private static void recursiveDeleteOnExit(File rootDir) {
-    rootDir.deleteOnExit();
-    File[] children = rootDir.listFiles();
-    if (null != children) {
-      for (File child: children) {
-        if (child.isDirectory()) {
-          recursiveDeleteOnExit(child);
-        } else {
-          child.deleteOnExit();
-        }
-      }
+  private Memoizer track(Memoizer memoizer) {
+    memoizers.add(memoizer);
+    return memoizer;
+  }
+
+  private static void deleteRecursively(Path root) throws IOException {
+    if (!Files.exists(root)) {
+      return;
     }
+    Files.walkFileTree(root, new SimpleFileVisitor<Path>() {
+
+      @Override
+      public FileVisitResult preVisitDirectory(Path directory,
+        BasicFileAttributes attributes) throws IOException
+      {
+        directory.toFile().setWritable(true);
+        return FileVisitResult.CONTINUE;
+      }
+
+      @Override
+      public FileVisitResult visitFile(Path file,
+        BasicFileAttributes attributes) throws IOException
+      {
+        Files.delete(file);
+        return FileVisitResult.CONTINUE;
+      }
+
+      @Override
+      public FileVisitResult postVisitDirectory(Path directory,
+        IOException failure) throws IOException
+      {
+        if (failure != null) {
+          throw failure;
+        }
+        Files.delete(directory);
+        return FileVisitResult.CONTINUE;
+      }
+    });
   }
 
   private static void checkMemo(Memoizer memoizer, String id)
@@ -105,7 +142,7 @@ public class MemoizerTest {
     assertEquals(memoFile.getAbsolutePath(), expMemoFile.getAbsolutePath());
   }
 
-  @BeforeMethod
+  @BeforeMethod(alwaysRun = true)
   public void setUp() throws Exception {
     idDir = createTempDir();
     File tempFile = new File(idDir, TEST_FILE);
@@ -114,40 +151,78 @@ public class MemoizerTest {
     reader = new FakeReader(); // No setId !
   }
 
-  @AfterMethod
+  @AfterMethod(alwaysRun = true)
   public void tearDown() throws Exception {
-    reader.close();
-    recursiveDeleteOnExit(idDir);
+    Exception failure = null;
+    for (int i = memoizers.size() - 1; i >= 0; i--) {
+      try {
+        memoizers.get(i).close();
+      }
+      catch (Exception e) {
+        if (failure == null) {
+          failure = e;
+        }
+        else {
+          failure.addSuppressed(e);
+        }
+      }
+    }
+    memoizers.clear();
+    if (reader != null) {
+      try {
+        reader.close();
+      }
+      catch (Exception e) {
+        failure = e;
+      }
+    }
+    for (int i = temporaryDirectories.size() - 1; i >= 0; i--) {
+      try {
+        deleteRecursively(temporaryDirectories.get(i));
+      }
+      catch (Exception e) {
+        if (failure == null) {
+          failure = e;
+        }
+        else {
+          failure.addSuppressed(e);
+        }
+      }
+    }
+    temporaryDirectories.clear();
+    if (failure != null) {
+      throw failure;
+    }
   }
 
   @Test
   public void testDefaultConstructor() throws Exception {
-    Memoizer memoizer = new Memoizer();
+    Memoizer memoizer = track(new Memoizer());
     checkMemoFile(memoizer.getMemoFile(id));
   }
 
   @Test
   public void testNullReader() throws Exception {
-    Memoizer memoizer = new Memoizer(null);
+    Memoizer memoizer = track(new Memoizer(null));
     checkMemoFile(memoizer.getMemoFile(id));
   }
 
   @Test
   public void testConstructorTimeElapsed() throws Exception {
-    Memoizer memoizer = new Memoizer(0);
+    Memoizer memoizer = track(new Memoizer(0));
     checkMemoFile(memoizer.getMemoFile(id));
     checkMemo(memoizer, id);
   }
 
   @Test
   public void testConstructorReader() throws Exception {
-    Memoizer memoizer = new Memoizer(reader);
+    Memoizer memoizer = track(new Memoizer(reader));
     checkMemoFile(memoizer.getMemoFile(id));
   }
 
   @Test
   public void testConstructorReaderTimeElapsed() throws Exception {
-    Memoizer memoizer = new Memoizer(reader, 0);
+    Memoizer memoizer = track(new Memoizer(reader, 0));
     checkMemoFile(memoizer.getMemoFile(id));
     checkMemo(memoizer, id);
   }
@@ -156,7 +231,7 @@ public class MemoizerTest {
   public void testConstructorTimeElapsedDirectory() throws Exception {
     File directory = createTempDir();
     directory.delete();
-    Memoizer memoizer = new Memoizer(0, directory);
+    Memoizer memoizer = track(new Memoizer(0, directory));
     // Check non-existing memo directory returns null
     assertNull(memoizer.getMemoFile(id));
     directory.mkdirs();
@@ -164,12 +239,11 @@ public class MemoizerTest {
     memoDir = memoDir.substring(memoDir.indexOf(File.separator) + 1);
     checkMemoFile(memoizer.getMemoFile(id), new File(directory, memoDir));
     checkMemo(memoizer, id);
-    recursiveDeleteOnExit(directory);
   }
 
   @Test
   public void testConstructorTimeElapsedNull() throws Exception {
-    Memoizer memoizer = new Memoizer(0, null);
+    Memoizer memoizer = track(new Memoizer(0, null));
     // Check null memo directory returns null
     assertNull(memoizer.getMemoFile(id));
     checkNoMemo(memoizer, id);
@@ -179,7 +253,7 @@ public class MemoizerTest {
   public void testConstructorReaderTimeElapsedDirectory() throws Exception {
     File directory = createTempDir();
     directory.delete();
-    Memoizer memoizer = new Memoizer(reader, 0, directory);
+    Memoizer memoizer = track(new Memoizer(reader, 0, directory));
     // Check non-existing memo directory returns null
     assertNull(memoizer.getMemoFile(id));
     directory.mkdirs();
@@ -187,12 +261,11 @@ public class MemoizerTest {
     memoDir = memoDir.substring(memoDir.indexOf(File.separator) + 1);
     checkMemoFile(memoizer.getMemoFile(id), new File(directory, memoDir));
     checkMemo(memoizer, id);
-    recursiveDeleteOnExit(directory);
   }
 
   @Test
   public void testConstructorReaderTimeElapsedNull() throws Exception {
-    Memoizer memoizer = new Memoizer(reader, 0, null);
+    Memoizer memoizer = track(new Memoizer(reader, 0, null));
     // Check null memo directory returns null
     assertNull(memoizer.getMemoFile(id));
     checkNoMemo(memoizer, id);
@@ -201,7 +274,7 @@ public class MemoizerTest {
   @Test
   public void testGetMemoFilePermissionsDirectory() throws Exception {
     File directory = createTempDir();
-    Memoizer memoizer = new Memoizer(reader, 0, directory);
+    Memoizer memoizer = track(new Memoizer(reader, 0, directory));
     if (directory.setWritable(false)) {
       assertNull(memoizer.getMemoFile(id));
     }
@@ -209,7 +282,7 @@ public class MemoizerTest {
 
   @Test
   public void testGetMemoFilePermissionsInPlaceDirectory() throws Exception {
-    Memoizer memoizer = new Memoizer(reader, 0, idDir);
+    Memoizer memoizer = track(new Memoizer(reader, 0, idDir));
     if (idDir.setWritable(false)) {
       assertNull(memoizer.getMemoFile(id));
     }
@@ -217,7 +290,7 @@ public class MemoizerTest {
 
   @Test
   public void testGetMemoFilePermissionsInPlace() throws Exception {
-    Memoizer memoizer = new Memoizer(reader);
+    Memoizer memoizer = track(new Memoizer(reader));
     if (idDir.setWritable(false)) {
       assertNull(memoizer.getMemoFile(id));
     }
@@ -226,7 +299,7 @@ public class MemoizerTest {
   @Test
   public void testRelocate() throws Exception {
     // Create an in-place memo file
-    Memoizer memoizer = new Memoizer(reader, 0);
+    Memoizer memoizer = track(new Memoizer(reader, 0));
     memoizer.setId(id);
     memoizer.close();
     assertFalse(memoizer.isLoadedFromMemo());
@@ -234,7 +307,8 @@ public class MemoizerTest {
 
     // Rename the directory (including the file and the memo file)
     File newidDir = new File(idDir.getAbsolutePath() + ".new");
-    idDir.renameTo(newidDir);
+    temporaryDirectories.add(newidDir.toPath());
+    Files.move(idDir.toPath(), newidDir.toPath());
     File newtempFile = new File(newidDir, TEST_FILE);
     String newid = newtempFile.getAbsolutePath();
 
@@ -243,13 +317,12 @@ public class MemoizerTest {
     memoizer.close();
     assertTrue(memoizer.isLoadedFromMemo());
     assertFalse(memoizer.isSavedToMemo());
-    recursiveDeleteOnExit(newidDir);
   }
 
   @Test
   public void testDeleteMemo() throws Exception {
     // Create an in-place memo file
-    Memoizer memoizer = new Memoizer(reader, 0);
+    Memoizer memoizer = track(new Memoizer(reader, 0));
     memoizer.setId(id);
     memoizer.close();
     assertFalse(memoizer.isLoadedFromMemo());
@@ -265,7 +338,7 @@ public class MemoizerTest {
 
   @Test
   public void testWrappedReader() throws Exception {
-    Memoizer memoizer = new Memoizer(reader, 0);
+    Memoizer memoizer = track(new Memoizer(reader, 0));
     File memoFile = memoizer.getMemoFile(id);
     assertFalse(memoFile.exists());
     reader.setId(id);
