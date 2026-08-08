@@ -130,6 +130,7 @@
       <groups/>
       <classes>
         <class name="loci.formats.utests.MemoizerTest"/>
+        <class name="loci.formats.utests.MemoizerOptionsTest"/>
       </classes>
     </test>
     <test name="AxisGuesserTest">
