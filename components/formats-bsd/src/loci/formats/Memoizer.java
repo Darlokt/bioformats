@@ -38,6 +38,18 @@ import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.lang.ArrayIndexOutOfBoundsException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
+import java.util.Base64;
+import java.util.Collections;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
 
 import loci.common.Constants;
 import loci.common.Location;
@@ -87,6 +99,14 @@ import org.objenesis.strategy.StdInstantiatorStrategy;
  *
  * In essence, the speed-up gained from memoization will happen only after the
  * first initialization of the reader for a particular file.
+ *
+ * Memo validity is checked against the existence, size, and modification time
+ * of files used during initialization. Directory membership is also recorded
+ * so that adding or removing a possible dataset dependency causes the reader
+ * to be initialized again. These checks are cache freshness heuristics, not
+ * content-integrity checks: a file whose contents change while its size and
+ * modification time remain identical cannot be distinguished without reading
+ * the file again.
  */
 public class Memoizer extends ReaderWrapper {
 
@@ -100,6 +120,10 @@ public class Memoizer extends ReaderWrapper {
 
     String loadRevision() throws IOException;
 
+    default DependencyManifest loadDependencyManifest() throws IOException {
+      return DependencyManifest.decode(loadRevision());
+    }
+
     IFormatReader loadReader() throws IOException, ClassNotFoundException;
 
     void loadStop() throws IOException;
@@ -112,11 +136,164 @@ public class Memoizer extends ReaderWrapper {
 
     void saveRevision(String revision) throws IOException;
 
+    default void saveDependencyManifest(DependencyManifest manifest)
+      throws IOException
+    {
+      saveRevision(manifest.encode());
+    }
+
     void saveReader(IFormatReader reader) throws IOException;
 
     void saveStop() throws IOException;
 
     void close();
+  }
+
+  /** File state recorded when a memo is created. */
+  public static final class FileFingerprint {
+
+    private final String path;
+    private final boolean relative;
+    private final boolean exists;
+    private final long length;
+    private final long lastModified;
+
+    private FileFingerprint(String path, boolean relative, boolean exists,
+      long length, long lastModified)
+    {
+      this.path = path;
+      this.relative = relative;
+      this.exists = exists;
+      this.length = length;
+      this.lastModified = lastModified;
+    }
+
+  }
+
+  /** Directory membership recorded when a memo is created. */
+  public static final class DirectoryFingerprint {
+
+    private final String path;
+    private final boolean relative;
+    private final boolean exists;
+    private final String digest;
+
+    private DirectoryFingerprint(String path, boolean relative,
+      boolean exists, String digest)
+    {
+      this.path = path;
+      this.relative = relative;
+      this.exists = exists;
+      this.digest = digest;
+    }
+  }
+
+  /** Dataset dependencies recorded when a memo is created. */
+  public static final class DependencyManifest {
+
+    private static final String FILE_RECORD = "F";
+    private static final String DIRECTORY_RECORD = "D";
+
+    private final FileFingerprint[] files;
+    private final DirectoryFingerprint[] directories;
+
+    private DependencyManifest(FileFingerprint[] files,
+      DirectoryFingerprint[] directories)
+    {
+      this.files = files;
+      this.directories = directories;
+    }
+
+    private String encode() {
+      StringBuilder manifest = new StringBuilder();
+      Base64.Encoder encoder = Base64.getUrlEncoder().withoutPadding();
+      for (FileFingerprint fingerprint : files) {
+        manifest.append(FILE_RECORD);
+        manifest.append('\t');
+        manifest.append(fingerprint.relative ? '1' : '0');
+        manifest.append('\t');
+        manifest.append(fingerprint.exists ? '1' : '0');
+        manifest.append('\t');
+        manifest.append(fingerprint.length);
+        manifest.append('\t');
+        manifest.append(fingerprint.lastModified);
+        manifest.append('\t');
+        manifest.append(encodePath(encoder, fingerprint.path));
+        manifest.append('\n');
+      }
+      for (DirectoryFingerprint fingerprint : directories) {
+        manifest.append(DIRECTORY_RECORD);
+        manifest.append('\t');
+        manifest.append(fingerprint.relative ? '1' : '0');
+        manifest.append('\t');
+        manifest.append(fingerprint.exists ? '1' : '0');
+        manifest.append('\t');
+        manifest.append(fingerprint.digest);
+        manifest.append('\t');
+        manifest.append(encodePath(encoder, fingerprint.path));
+        manifest.append('\n');
+      }
+      return manifest.toString();
+    }
+
+    private static DependencyManifest decode(String manifest)
+      throws IOException
+    {
+      if (manifest.isEmpty()) {
+        return new DependencyManifest(new FileFingerprint[0],
+          new DirectoryFingerprint[0]);
+      }
+      String[] lines = manifest.split("\\n");
+      List<FileFingerprint> files = new ArrayList<FileFingerprint>();
+      List<DirectoryFingerprint> directories =
+        new ArrayList<DirectoryFingerprint>();
+      Base64.Decoder decoder = Base64.getUrlDecoder();
+      try {
+        for (String line : lines) {
+          String[] fields = line.split("\\t", -1);
+          if (fields.length == 6 && FILE_RECORD.equals(fields[0])) {
+            files.add(new FileFingerprint(decodePath(decoder, fields[5]),
+              decodeFlag(fields[1]), decodeFlag(fields[2]),
+              Long.parseLong(fields[3]), Long.parseLong(fields[4])));
+          }
+          else if (fields.length == 5 &&
+            DIRECTORY_RECORD.equals(fields[0]))
+          {
+            directories.add(new DirectoryFingerprint(
+              decodePath(decoder, fields[4]), decodeFlag(fields[1]),
+              decodeFlag(fields[2]), fields[3]));
+          }
+          else {
+            throw new IOException("Invalid dependency manifest");
+          }
+        }
+      }
+      catch (IllegalArgumentException e) {
+        throw new IOException("Invalid dependency manifest", e);
+      }
+      return new DependencyManifest(
+        files.toArray(new FileFingerprint[files.size()]),
+        directories.toArray(
+          new DirectoryFingerprint[directories.size()]));
+    }
+
+    private static String encodePath(Base64.Encoder encoder, String path) {
+      return encoder.encodeToString(path.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static String decodePath(Base64.Decoder decoder, String path) {
+      return new String(decoder.decode(path), StandardCharsets.UTF_8);
+    }
+
+    private static boolean decodeFlag(String flag) throws IOException {
+      if ("1".equals(flag)) {
+        return true;
+      }
+      if ("0".equals(flag)) {
+        return false;
+      }
+      throw new IOException("Invalid dependency manifest flag");
+    }
   }
 
   public static class KryoDeser implements Deser {
@@ -341,7 +518,7 @@ public class Memoizer extends ReaderWrapper {
    * cached items. This should happen when the order and type of objects stored
    * in the memo file changes.
    */
-  public static final Integer VERSION = 4;
+  public static final Integer VERSION = 5;
 
   /**
    * Default value for {@link #minimumElapsed} if none is provided in the
@@ -393,8 +570,8 @@ public class Memoizer extends ReaderWrapper {
 
   /**
    * Boolean specifying whether to invalidate the memo file based upon
-   * mismatched major/minor version numbers. By default, the Git commit hash
-   * is used to invalidate the memo file.
+   * mismatched major/minor version numbers. Release versions are not compared
+   * by default.
    */
   private boolean versionChecking = false;
 
@@ -584,9 +761,8 @@ public class Memoizer extends ReaderWrapper {
   }
 
   /**
-   * Returns {@code true} if the version of the memo file as returned by
-   * {@link Deser#loadReleaseVersion()} and {@link Deser#loadRevision()}
-   * do not match the current version as specified by {@link FormatTools#VERSION}.
+   * Returns {@code true} if release-version checking is enabled and the
+   * memo's major/minor release does not match {@link FormatTools#VERSION}.
    */
   public boolean versionMismatch() throws IOException {
 
@@ -613,14 +789,6 @@ public class Memoizer extends ReaderWrapper {
         return true;
       }
 
-      // REVISION NUMBER
-      if (!versionChecking &&
-          FormatTools.VERSION.endsWith("-SNAPSHOT")) {
-        LOGGER.info("Development version: {}",
-          FormatTools.VERSION);
-        return true;
-      }
-
       return false;
   }
 
@@ -632,8 +800,8 @@ public class Memoizer extends ReaderWrapper {
    * calling code (e.g. 4.4) and the major/minor version saved in the memo
    * file (e.g. 5.0) will result in the memo file being invalidated.
    *
-   * If {@code false} (default), a mismatch in the Git commit hashes will
-   * invalidate the memo file.
+   * If {@code false} (default), the release version is not compared. Memo
+   * format compatibility is still checked using {@link #VERSION}.
    *
    * This method allows for less strict version checking.
    *
@@ -916,10 +1084,14 @@ public class Memoizer extends ReaderWrapper {
       }
 
       // RELEASE VERSION NUMBER
-       if (versionMismatch()) {
+      if (versionMismatch()) {
          // Logging done in versionMismatch
          return null;
        }
+
+      if (!dependenciesMatch(ser.loadDependencyManifest())) {
+        return null;
+      }
 
       // CLASS & COPY
       try {
@@ -1002,6 +1174,8 @@ public class Memoizer extends ReaderWrapper {
     final StopWatch sw = stopWatch();
     boolean rv = true;
     try {
+      DependencyManifest manifest = createDependencyManifest();
+
       // Create temporary location for output
       // Note: can't rename tempfile until resources are closed.
       tempFile = File.createTempFile(
@@ -1012,6 +1186,7 @@ public class Memoizer extends ReaderWrapper {
       // Save to temporary location.
       ser.saveVersion(VERSION);
       ser.saveReleaseVersion(FormatTools.VERSION);
+      ser.saveDependencyManifest(manifest);
       ser.saveReader(reader);
       ser.saveStop();
       LOGGER.debug("saved to temp file: {}", tempFile);
@@ -1048,6 +1223,147 @@ public class Memoizer extends ReaderWrapper {
       deleteQuietly(tempFile);
     }
     return rv;
+  }
+
+  private DependencyManifest createDependencyManifest() throws IOException {
+    String[] usedFiles = reader.getUsedFiles();
+    FileFingerprint[] fingerprints = new FileFingerprint[usedFiles.length];
+    Location primaryParent = realFile.getAbsoluteFile().getParentFile();
+    Path primaryParentPath = primaryParent == null ? null :
+      Paths.get(primaryParent.getAbsolutePath()).normalize();
+    Set<Path> dependencyDirectories = new LinkedHashSet<Path>();
+    if (primaryParentPath != null) {
+      dependencyDirectories.add(primaryParentPath);
+    }
+
+    for (int i = 0; i < usedFiles.length; i++) {
+      Location usedFile = new Location(usedFiles[i]).getAbsoluteFile();
+      Path usedPath = Paths.get(usedFile.getAbsolutePath()).normalize();
+      StoredPath storedPath = storePath(usedPath, primaryParentPath);
+      Path parent = usedPath.getParent();
+      if (parent != null) {
+        dependencyDirectories.add(parent);
+      }
+      if (usedFile.isDirectory()) {
+        dependencyDirectories.add(usedPath);
+      }
+      fingerprints[i] = new FileFingerprint(storedPath.path,
+        storedPath.relative,
+        usedFile.exists(), usedFile.length(), usedFile.lastModified());
+    }
+
+    DirectoryFingerprint[] directories =
+      new DirectoryFingerprint[dependencyDirectories.size()];
+    int index = 0;
+    for (Path directory : dependencyDirectories) {
+      StoredPath storedPath = storePath(directory, primaryParentPath);
+      boolean exists = Files.isDirectory(directory);
+      directories[index++] = new DirectoryFingerprint(storedPath.path,
+        storedPath.relative, exists,
+        exists ? fingerprintDirectory(directory) : "");
+    }
+    return new DependencyManifest(fingerprints, directories);
+  }
+
+  private boolean dependenciesMatch(DependencyManifest manifest)
+    throws IOException
+  {
+    Location primaryParent = realFile.getAbsoluteFile().getParentFile();
+    for (FileFingerprint fingerprint : manifest.files) {
+      Location usedFile = resolvePath(fingerprint.path, fingerprint.relative,
+        primaryParent);
+      if (usedFile.exists() != fingerprint.exists ||
+        usedFile.length() != fingerprint.length ||
+        usedFile.lastModified() != fingerprint.lastModified)
+      {
+        LOGGER.debug("used file changed since memo creation: {}", usedFile);
+        return false;
+      }
+    }
+    for (DirectoryFingerprint fingerprint : manifest.directories) {
+      Location directory = resolvePath(fingerprint.path,
+        fingerprint.relative, primaryParent);
+      boolean exists = directory.isDirectory();
+      if (exists != fingerprint.exists ||
+        (exists && !fingerprint.digest.equals(
+          fingerprintDirectory(Paths.get(directory.getAbsolutePath())))))
+      {
+        LOGGER.debug(
+          "dependency directory changed since memo creation: {}", directory);
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private Location resolvePath(String path, boolean relative,
+    Location primaryParent)
+  {
+    return relative && primaryParent != null ?
+      new Location(primaryParent, path) : new Location(path);
+  }
+
+  private StoredPath storePath(Path path, Path primaryParent) {
+    if (primaryParent != null) {
+      try {
+        return new StoredPath(primaryParent.relativize(path).toString(), true);
+      }
+      catch (IllegalArgumentException e) {
+        LOGGER.debug("Cannot make dependency relative to primary file: {}",
+          path);
+      }
+    }
+    return new StoredPath(path.toString(), false);
+  }
+
+  private String fingerprintDirectory(Path directory) throws IOException {
+    List<String> names = new ArrayList<String>();
+    try (java.nio.file.DirectoryStream<Path> entries =
+      Files.newDirectoryStream(directory))
+    {
+      for (Path entry : entries) {
+        String name = entry.getFileName().toString();
+        if (!isMemoArtifact(name)) {
+          names.add(name);
+        }
+      }
+    }
+    Collections.sort(names);
+
+    MessageDigest digest;
+    try {
+      digest = MessageDigest.getInstance("SHA-256");
+    }
+    catch (NoSuchAlgorithmException e) {
+      throw new IllegalStateException("SHA-256 is not available", e);
+    }
+    for (String name : names) {
+      byte[] bytes = name.getBytes(StandardCharsets.UTF_8);
+      digest.update((byte) (bytes.length >>> 24));
+      digest.update((byte) (bytes.length >>> 16));
+      digest.update((byte) (bytes.length >>> 8));
+      digest.update((byte) bytes.length);
+      digest.update(bytes);
+    }
+    return Base64.getUrlEncoder().withoutPadding()
+      .encodeToString(digest.digest());
+  }
+
+  private boolean isMemoArtifact(String name) {
+    return name.endsWith(".bfmemo") ||
+      name.matches(".*\\.bfmemo[0-9]+") ||
+      (name.contains(".bfmemo.") && name.endsWith(".tmp"));
+  }
+
+  private static final class StoredPath {
+
+    private final String path;
+    private final boolean relative;
+
+    private StoredPath(String path, boolean relative) {
+      this.path = path;
+      this.relative = relative;
+    }
   }
 
   /**
